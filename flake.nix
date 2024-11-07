@@ -21,6 +21,8 @@
       pkgs = import nixpkgs { system = "x86_64-linux"; overlays = [ (import rust-overlay) ]; };
       pkgs-aarch64 = import nixpkgs { system = "aarch64-linux"; };
 
+      python = pkgs.python311; # In order to accommodate numba
+
       artiqVersionMajor = 9;
       artiqVersionMinor = self.sourceInfo.revCount or 0;
       artiqVersionId = self.sourceInfo.shortRev or "unknown";
@@ -59,32 +61,27 @@
         fontconfig
       ];
 
-      pythonparser = pkgs.python3Packages.buildPythonPackage {
+      pythonparser = python.pkgs.buildPythonPackage {
         pname = "pythonparser";
         version = "1.4";
         src = src-pythonparser;
         doCheck = false;
-        propagatedBuildInputs = with pkgs.python3Packages; [ regex ];
+        propagatedBuildInputs = with python.pkgs; [ regex ];
       };
 
-      qasync = pkgs.python3Packages.buildPythonPackage rec {
-        pname = "qasync";
-        version = "0.27.1";
-        format = "pyproject";
-        src = pkgs.fetchFromGitHub {
-          owner = "CabbageDevelopment";
-          repo = "qasync";
-          rev = "refs/tags/v${version}";
-          sha256 = "sha256-oXzwilhJ1PhodQpOZjnV9gFuoDy/zXWva9LhhK3T00g=";
-        };
-        postPatch = ''
-          rm qasync/_windows.py # Ignoring it is not taking effect and it will not be used on Linux
-        '';
-        buildInputs = [ pkgs.python3Packages.poetry-core ];
-        propagatedBuildInputs = [ pkgs.python3Packages.pyqt6 ];
-        checkInputs = [ pkgs.python3Packages.pytestCheckHook ];
-        pythonImportsCheck = [ "qasync" ];
-        disabledTestPaths = [ "tests/test_qeventloop.py" ];
+      sipyco-py311 = python.pkgs.buildPythonPackage {
+        pname = "sipyco";
+        version = "1.8";
+        src = sipyco;
+        doCheck = false;
+      };
+
+      artiq-comtools-py311 = python.pkgs.buildPythonPackage {
+        pname = "artiq-comtools";
+        version = "1.0";
+        src = artiq-comtools;
+        propagatedBuildInputs = [ sipyco-py311 ];
+        doCheck = false;
       };
 
       libartiq-support = pkgs.stdenv.mkDerivation {
@@ -105,43 +102,60 @@
         '';
       };
 
-      llvmlite-new = pkgs.python3Packages.buildPythonPackage rec {
-        pname = "llvmlite";
-        version = "0.43.0";
+
+      qasync = python.pkgs.buildPythonPackage rec {
+        pname = "qasync";
+        version = "0.23.0";  # 使用固定版本
         src = pkgs.fetchFromGitHub {
-            owner = "numba";
-            repo = "llvmlite";
-            rev = "v${version}";
-            sha256 = "sha256-5QBSRDb28Bui9IOhGofj+c7Rk7J5fNv5nPksEPY/O5o=";
-          };
-        nativeBuildInputs = [ pkgs.llvm_15 ];
-        # Disable static linking
-        # https://github.com/numba/llvmlite/issues/93
-        postPatch = ''
-          substituteInPlace ffi/Makefile.linux --replace "-static-libstdc++" ""
-          substituteInPlace llvmlite/tests/test_binding.py --replace "test_linux" "nope"
-        '';
-        # Set directory containing llvm-config binary
-        preConfigure = ''
-          export LLVM_CONFIG=${pkgs.llvm_15.dev}/bin/llvm-config
-        '';
+          owner = "CabbageDevelopment";
+          repo = "qasync";
+          rev = "v${version}";
+          sha256 = "sha256-2wustBtShydCXM5L5IQbOaZ2BfGxbIPwLZ8sRfxFnM4=";
+        };
+        propagatedBuildInputs = with python.pkgs; [ pyqt6 ];
+        doCheck = false;
       };
 
-      artiq-upstream = pkgs.python3Packages.buildPythonPackage rec {
+      artiq-upstream = python.pkgs.buildPythonPackage rec {
         pname = "artiq";
         version = artiqVersion;
         src = self;
 
-        preBuild =
-          ''
-          export VERSIONEER_OVERRIDE=${version}
+        preBuild = ''
+          export VERSIONEER_OVERRIDE=${artiqVersion}
           export VERSIONEER_REV=${artiqRev}
-          '';
+        '';
+
+        doCheck = false;
 
         nativeBuildInputs = [ pkgs.qt6.wrapQtAppsHook ];
-        # keep llvm_x and lld_x in sync with llvmlite
-        propagatedBuildInputs = [ pkgs.llvm_15 pkgs.lld_15 sipyco.packages.x86_64-linux.sipyco pythonparser llvmlite-new pkgs.qt6.qtsvg artiq-comtools.packages.x86_64-linux.artiq-comtools ]
-          ++ (with pkgs.python3Packages; [ pyqtgraph pygit2 numpy dateutil scipy prettytable pyserial levenshtein h5py pyqt6 qasync tqdm lmdb jsonschema platformdirs ]);
+        propagatedBuildInputs = [ 
+          pkgs.llvm_15 
+          pkgs.lld_15 
+          sipyco-py311
+          pythonparser 
+          python.pkgs.llvmlite 
+          pkgs.qt6.qtsvg 
+          artiq-comtools-py311
+          qasync
+        ] ++ (with python.pkgs; [ 
+          pyqtgraph 
+          pygit2 
+          numpy 
+          dateutil 
+          scipy 
+          prettytable 
+          pyserial 
+          levenshtein 
+          h5py 
+          pyqt6 
+          tqdm 
+          lmdb 
+          jsonschema 
+          platformdirs
+          numba
+          llvmlite
+        ]);
 
         dontWrapQtApps = true;
         postFixup = ''
@@ -150,36 +164,33 @@
           wrapQtApp "$out/bin/artiq_session"
         '';
 
-        preFixup =
-          ''
-          # Ensure that wrapProgram uses makeShellWrapper rather than makeBinaryWrapper
-          # brought in by wrapQtAppsHook. Only makeShellWrapper supports --run.
+        preFixup = ''
           wrapProgram() { wrapProgramShell "$@"; }
-          '';
-        ## Modifies PATH to pass the wrapped python environment (i.e. python3.withPackages(...) to subprocesses.
-        ## Allows subprocesses using python to find all packages you have installed
+        '';
+
         makeWrapperArgs = [
           ''--run 'if [ ! -z "$NIX_PYTHONPREFIX" ]; then export PATH=$NIX_PYTHONPREFIX/bin:$PATH;fi' ''
           "--set FONTCONFIG_FILE ${pkgs.fontconfig.out}/etc/fonts/fonts.conf"
         ];
 
-        # FIXME: automatically propagate lld_15 llvm_15 dependencies
-        # cacert is required in the check stage only, as certificates are to be
-        # obtained from system elsewhere
-        nativeCheckInputs = with pkgs; [ lld_15 llvm_15 lit outputcheck cacert ] ++ [ libartiq-support ];
+        nativeCheckInputs = with pkgs; [ 
+          lld_15 
+          llvm_15 
+          lit 
+          outputcheck 
+          cacert 
+          python.pkgs.numba 
+          python.pkgs.llvmlite
+        ] ++ [ libartiq-support ];
         checkPhase = ''
           python -m unittest discover -v artiq.test
-
           TESTDIR=`mktemp -d`
           cp --no-preserve=mode,ownership -R $src/artiq/test/lit $TESTDIR
           LIBARTIQ_SUPPORT=`libartiq-support` lit -v $TESTDIR/lit
-          '';
+        '';
       };
 
-      artiq = artiq-upstream // {
-        withExperimentalFeatures = features: artiq-upstream.overrideAttrs(oa:
-            { patches = map (f: ./experimental-features/${f}.diff) features; });
-      };
+      artiq = artiq-upstream;
 
       migen = pkgs.python3Packages.buildPythonPackage rec {
         name = "migen";
@@ -331,6 +342,33 @@
           fi
         done
         '';
+
+      python-packages = ps: with ps; [
+        migen 
+        misoc 
+        paramiko 
+        packaging
+        jupyter 
+        notebook 
+        ipykernel
+        jupyterlab
+        matplotlib
+        numpy
+        pandas
+        seaborn
+        numba
+        ps.llvmlite
+        pkgconfig
+        cython
+        six
+      ] ++ (
+        builtins.filter (p: 
+          p.pname != "llvmlite" && 
+          p.pname != "numba"
+        ) artiq.propagatedBuildInputs
+      );
+
+      python-with-packages = python.withPackages python-packages;
     in rec {
       packages.x86_64-linux = {
         inherit pythonparser qasync artiq;
@@ -403,48 +441,52 @@
       devShells.x86_64-linux.default = pkgs.mkShell {
         name = "artiq-dev-shell";
         buildInputs = [
-          (pkgs.python3.withPackages(ps: with packages.x86_64-linux; [ 
+          (python.withPackages (ps: [
+            ps.h5py
+            ps.numpy
+            ps.scipy
+            ps.pyqt6
+            qasync
+            ps.pyqtgraph
+            ps.prettytable
+            ps.levenshtein
+            ps.tqdm
+            ps.lmdb
+            ps.jsonschema
+            ps.platformdirs
+            ps.numba
+            ps.llvmlite
             migen 
             misoc 
-            ps.paramiko 
-            microscope 
-            ps.packaging
-            # Add Jupyter packages
-            ps.jupyter 
-            ps.notebook 
-            ps.ipykernel
-            ps.jupyterlab
-            # Computational packages
-            ps.matplotlib
-            ps.numpy
-            ps.pandas
-            ps.seaborn
-            ps.h5py
-          ] ++ artiq.propagatedBuildInputs ))
+            artiq
+          ]))
           rust
           pkgs.llvmPackages_15.clang-unwrapped
           pkgs.llvm_15
           pkgs.lld_15
           pkgs.git
-          artiq-frontend-dev-wrappers
-          # To manually run compiler tests:
-          pkgs.lit
-          pkgs.outputcheck
-          libartiq-support
-          # use the vivado-env command to enter a FHS shell that lets you run the Vivado installer
-          packages.x86_64-linux.vivadoEnv
-          packages.x86_64-linux.vivado
-          packages.x86_64-linux.openocd-bscanspi
-          pkgs.python3Packages.sphinx pkgs.python3Packages.sphinx_rtd_theme pkgs.pdf2svg
-          pkgs.python3Packages.sphinx-argparse pkgs.python3Packages.sphinxcontrib-wavedrom latex-artiq-manual
-          pkgs.python3Packages.sphinxcontrib-tikz
+          pkgs.hdf5
         ];
+        
         shellHook = ''
           export LIBARTIQ_SUPPORT=`libartiq-support`
           export QT_PLUGIN_PATH=${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.dev.qtPluginPrefix}:${pkgs.qt6.qtsvg}/${pkgs.qt6.qtbase.dev.qtPluginPrefix}
           export QML2_IMPORT_PATH=${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.dev.qtQmlPrefix}
-          export PYTHONPATH=`git rev-parse --show-toplevel`:$PYTHONPATH
+          
+          find . -type d -name "__pycache__" -exec rm -r {} + 2>/dev/null || true
+          find . -name "*.pyc" -delete
+          
+          echo "Python version:"
+          python --version
+          python -c "import h5py; print('h5py Version:', h5py.__version__)" || echo "h5py Import Failed"
+          python -c "import numba; print('numba Version:', numba.__version__)" || echo "numba Import Failed"
         '';
+
+        PYTHONPATH = "${python-with-packages}/${python-with-packages.sitePackages}";
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+          pkgs.hdf5
+          pkgs.stdenv.cc.cc.lib
+        ];
       };
 
       # Lighter development shell optimized for building firmware and flashing boards.
