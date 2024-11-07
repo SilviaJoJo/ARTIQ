@@ -5,6 +5,10 @@ from artiq.experiment import *
 
 
 class RunForever(EnvExperiment):
+    """
+    A demonstration experiment that runs indefinitely until terminated.
+    Shows how to implement graceful termination handling in ARTIQ.
+    """
     def build(self):
         self.setattr_device("scheduler")
 
