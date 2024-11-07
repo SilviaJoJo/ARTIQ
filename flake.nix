@@ -403,7 +403,24 @@
       devShells.x86_64-linux.default = pkgs.mkShell {
         name = "artiq-dev-shell";
         buildInputs = [
-          (pkgs.python3.withPackages(ps: with packages.x86_64-linux; [ migen misoc ps.paramiko microscope ps.packaging ] ++ artiq.propagatedBuildInputs ))
+          (pkgs.python3.withPackages(ps: with packages.x86_64-linux; [ 
+            migen 
+            misoc 
+            ps.paramiko 
+            microscope 
+            ps.packaging
+            # Add Jupyter packages
+            ps.jupyter 
+            ps.notebook 
+            ps.ipykernel
+            ps.jupyterlab
+            # Computational packages
+            ps.matplotlib
+            ps.numpy
+            ps.pandas
+            ps.seaborn
+            ps.h5py
+          ] ++ artiq.propagatedBuildInputs ))
           rust
           pkgs.llvmPackages_15.clang-unwrapped
           pkgs.llvm_15
